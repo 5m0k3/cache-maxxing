@@ -51,7 +51,7 @@ Claude keeps your chat "warm" only for a while so follow-up messages barely dent
 
 Requires a recent Claude Code: the desktop app, the VS Code extension, or the CLI. It's tested on 2.1.325 and later.
 
-**Any application**
+**Any application**  
 Just paste this repository's link (https://github.com/5m0k3/cache-maxxing) in the chat window and ask Claude to install it for you.
 
 or see below for your specific application:
