@@ -52,8 +52,8 @@ Claude keeps your chat "warm" only for a while so follow-up messages barely dent
 Requires a recent Claude Code: the desktop app, the VS Code extension, or the CLI. It's tested on 2.1.325 and later.
 
 **Desktop app**
-1. Click **+** next to the chat box, then **Plugins**.
-2. **Add marketplace** and enter `5m0k3/cache-maxxing`.
+1. Click **+** next to the chat box, then **Plugins** → **Manage Plugins**.
+2. On top right press **+ Add** → **Add marketplace** → **Add from a repository** and enter `5m0k3/cache-maxxing`.
 3. **Add plugin** → cache-maxxing.
 
 **Terminal or VS Code** (at the Claude Code prompt)
