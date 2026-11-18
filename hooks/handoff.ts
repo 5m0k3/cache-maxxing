@@ -149,8 +149,8 @@ export function assembleBrief(ctx: Ctx, f: Facts, n: Numbers, haiku: string | un
   return `${[header, haiku?.trim(), factsBlock(f, n, !haiku)].filter(Boolean).join('\n\n')}\n`
 }
 
-/** Claude Code keeps transcripts under the folder with every non-alphanumeric character as '-'. */
-export const transcriptGuess = (cwd: string, id: string) => `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${id}.jsonl`
+/** Claude Code keeps transcripts under the folder with every non-alphanumeric character as '-', in CLAUDE_CONFIG_DIR or ~/.claude. */
+export const transcriptGuess = (cwd: string, id: string, configDir = '~/.claude') => `${configDir.replace(/\/+$/, '')}/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${id}.jsonl`
 
 /** .claude/handoffs/2026-11-16-223015-ab754061.md (seconds: two handoffs in one minute don't overwrite) */
 export function handoffPath(now: number, sessionId: string): string {
