@@ -129,7 +129,7 @@ Costs are estimates at standard API list prices, and a floor: a reply that uses 
 
 ## Limitations
 
-- If your organization blocks Haiku, `/cmaxx-handoff` says no handoff was written; the chat is untouched.
+- If your organization blocks Haiku, `/cmaxx-handoff` writes a facts-only briefing that keeps your last message, and says why.
 - The handoff's saving is an estimate: Haiku's share and a fresh chat's start are taken from measured medians, priced as Claude Haiku 5.5.
 - Switching model and back within the hour shows "cache reset", although the first model's cache may still be warm.
 - `/cmaxx-stats` reads an older chat's history from its transcript only up to 4 MiB; a bigger chat that started before you installed the plugin is counted from when the plugin first saw it.

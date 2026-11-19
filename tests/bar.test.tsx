@@ -593,7 +593,7 @@ test('stats fill-in: a transcript over 4 MiB is not read; the column says since 
   expect(t).toContain('| Replies | 1 | 1 |')
 })
 
-function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExit?: number; offline?: boolean; pricesFail?: boolean; store?: Record<string, unknown> } = {}) {
+function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExit?: number; processOut?: string; offline?: boolean; pricesFail?: boolean; store?: Record<string, unknown> } = {}) {
   const w = engine(on, { store: o.store })
   const calls = { argv: [] as string[][], urls: [] as string[] }
   on('fs.read', (_, e) => {
@@ -610,7 +610,7 @@ function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExi
   on('process.run', (_, e) => {
     calls.argv.push([...(e as { argv: string[] }).argv])
     if (o.processExit === undefined) throw new Error('not available on this surface')
-    return { value: { exitCode: o.processExit, stdout: '', stderr: '' } } as never
+    return { value: { exitCode: o.processExit, stdout: o.processOut ?? '', stderr: '' } } as never
   })
   on('ui.log', () => ({ value: undefined }))
   return { ...w, calls }
@@ -648,7 +648,7 @@ test('update, newer version but the updater is refused: manual steps, and prices
 test('update: offline or a bad table changes nothing', async ($, on) => {
   updateEngine(on, { offline: true })
   await start($)
-  expect(await runUpdate($)).toMatch(/^cache-maxxing: Couldn't check for a new version \(.*\)\. Prices not checked \(.*\)\. Nothing changed\.$/)
+  expect(await runUpdate($)).toBe("Couldn't check for a new version: GitHub not reachable (offline?). Prices not checked: GitHub not reachable (offline?). Nothing changed.")
 })
 
 test('update: a refused price table leaves the prices as they were', async ($, on) => {
@@ -712,7 +712,7 @@ test('update: a failed price download never hides a finished update', async ($, 
   await start($)
   const t = await runUpdate($)
   expect(t).toContain('Updated cache-maxxing 0.4.0 → 0.5.0. Run /reload-plugins')
-  expect(t).toContain('Prices not checked (')
+  expect(t).toContain('Prices not checked: GitHub not reachable (offline?).')
   expect(t.includes('Nothing changed')).toBe(false)
 })
 
@@ -793,4 +793,12 @@ test('update: an older download never replaces newer prices saved earlier (issue
   expect(await runUpdate($)).toContain('Prices: up to date (2026-12-05).')
   await u.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
   await expectBar($, '🟢 60 min left · next message ≈ $0.04 · 50K / 1M · ✅ Keep going')
+})
+
+test('update: when Claude Code says it is already at the latest, the reply never claims "Updated" (F73)', async ($, on) => {
+  updateEngine(on, { latest: '0.5.0', processExit: 0, processOut: '✔ cache-maxxing is already at the latest version (0.4.0).' })
+  await start($)
+  const t = await runUpdate($)
+  expect(t.includes('Updated')).toBe(false)
+  expect(t).toContain('claude plugin marketplace update cache-maxxing')
 })

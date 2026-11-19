@@ -1,6 +1,6 @@
 {
   "name": "cache-maxxing",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shows how long Claude's chat memory (prompt cache) stays active and what your next message costs, with a plain-language tip",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -35,7 +35,7 @@
     "memoryMinutes": {
       "type": "string",
       "title": "Memory time",
-      "description": "auto = 1 hour (Claude subscription). Choose 5 if you use an API key; 60 forces 1 hour.",
+      "description": "auto follows each reply (1 hour on a subscription, 5 minutes with an API key or usage credits); 5 or 60 force it.",
       "options": [
         "auto",
         "5",

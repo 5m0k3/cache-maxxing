@@ -16,6 +16,8 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const MAX_READ = 4 * 1024 * 1024 // $.fs.read refuses bigger files
 const REPO_RAW = 'https://raw.githubusercontent.com/5m0k3/cache-maxxing/main'
 const SEED_MS = 30_000 // a handoff line older than this is stale: a later /clear of your own gets an empty box
+// An error for a reply: its message only, never a cut-off "Error: …" dump
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 200)
 const SAME_REPLY_MS = 10 * 60_000 // an estimate this close after an exact record describes the same reply
 const FRESH_SAMPLES = 20 // fresh chats' first cache writes kept for the handoff saving
 
@@ -337,7 +339,10 @@ export const register: Register = (on, options) => {
   // updater where the plugin may run it (the terminal); otherwise the reply says how.
   on('command.run', { command: 'cmaxx-update' }, async $ => {
     const get = async (file: string) => {
-      const r = await $.http.fetch(`${REPO_RAW}/${file}`)
+      const r = await $.http.fetch(`${REPO_RAW}/${file}`).catch((err: unknown) => {
+        $.ui.log(`cache-maxxing: /cmaxx-update fetch ${file}: ${String(err)}`, { to: 'debug' })
+        throw new Error('GitHub not reachable (offline?)') // the raw error went to the debug log
+      })
       if (!r.ok) throw new Error(`${file}: HTTP ${r.status}`)
       return JSON.parse(r.text) as unknown
     }
@@ -351,12 +356,16 @@ export const register: Register = (on, options) => {
       else {
         const run = await $.process.run(['claude', 'plugin', 'update', 'cache-maxxing@cache-maxxing'], { timeoutMs: 120_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
         $.ui.log(`cache-maxxing: plugin update exit ${run.exitCode}: ${run.stderr.slice(0, 300)}`, { to: 'debug' })
-        lines.push(run.exitCode === 0
+        // exit 0 also when nothing changed: Claude Code's marketplace copy is older than GitHub (F73)
+        const isStale = run.exitCode === 0 && /already at the latest version/i.test(`${run.stdout} ${run.stderr}`)
+        lines.push(isStale
+          ? `Version ${latest} is out, but Claude Code's copy of the marketplace is behind (you have ${mine}). In a terminal run \`claude plugin marketplace update cache-maxxing\`, then /cmaxx-update again.`
+          : run.exitCode === 0
           ? `Updated cache-maxxing ${mine} → ${latest}. Run /reload-plugins (or restart the app) to use it.`
           : `Version ${latest} is out (you have ${mine}). To update: in a terminal run \`claude plugin update cache-maxxing@cache-maxxing\`, or in the desktop app open + → Plugins → Manage plugins. Then run /reload-plugins. Tip: \`/plugin\` → Marketplaces → cache-maxxing → Enable auto-update keeps it current.`)
       }
     } catch (err) {
-      lines.push(`Couldn't check for a new version (${String(err).slice(0, 200)}).`)
+      lines.push(`Couldn't check for a new version: ${errText(err)}.`)
     }
     try {
       const v = validatePrices(await get('prices.json'), PRICES_DATE)
@@ -378,10 +387,11 @@ export const register: Register = (on, options) => {
         lines.push(changed ? `Prices updated to ${v.sourceDate}${added.length ? `: new ${added.map(k => `claude-${k}`).join(', ')}` : ''}.` : `Prices: up to date (${v.sourceDate}).`)
       }
     } catch (err) {
-      lines.push(`Prices not checked (${String(err).slice(0, 200)}).`)
+      lines.push(`Prices not checked: ${errText(err)}.`)
     }
     const isNothingChecked = lines.every(l => l.startsWith("Couldn't") || l.startsWith('Prices not checked'))
-    return { text: isNothingChecked ? `cache-maxxing: ${lines.join(' ')} Nothing changed.` : lines.join(' ') }
+    // no "cache-maxxing:" of our own: Claude Code already names the plugin on its output
+    return { text: isNothingChecked ? `${lines.join(' ')} Nothing changed.` : lines.join(' ') }
   })
 
   on('command.run', { command: 'cmaxx-stats' }, async $ => {

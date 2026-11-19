@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-19
+
+Thanks to @giulioc84 (#1–#7), @xyaso66-del (#9), @lysol321 (#10) and @jstockall (#8) for the careful reports and the fix.
+
 ### Changed
 - The 🟢 countdown shows whole minutes (`48 min left`), rounded up, so it no longer ticks every second; from 🟡 on it still shows minutes and seconds.
 - Memory time `auto` follows each reply's own cache write: 1 hour on a subscription, 5 minutes with an API key, a cloud provider or usage credits (#4).
@@ -18,6 +22,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - A compact reported as 0 tokens no longer shows a free rebuild; `/cmaxx-stats` counts a rebuild when a reply reads far less than the chat while the cache should be warm (#5).
 - `/cmaxx-stats`: a failed write keeps the turn's counts; a new chat is never re-read from its transcript later; a "<$0.01" handoff saving keeps its tokens; Haiku's price tier counts uncached input (#6).
 - `/cmaxx-update`: an older price download never replaces newer saved prices; versions with a pre-release or build tag compare correctly (#6).
+- `/cmaxx-update`: offline now says "GitHub not reachable (offline?)" instead of a raw error, and it no longer says "Updated" when Claude Code's marketplace copy was behind.
+- `/cmaxx-handoff` finds the transcript under `CLAUDE_CONFIG_DIR` when that is set (#8, by @jstockall).
+- README: a blocked Haiku gives a facts-only briefing, not "no handoff".
 
 ## [0.4.0] - first public release
 
@@ -31,5 +38,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - **`/cmaxx`:** shows or hides the bar.
 - Settings: rebuild limit, warning time, long-chat size, cost style, cache time.
 
-[Unreleased]: https://github.com/5m0k3/cache-maxxing/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/5m0k3/cache-maxxing/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/5m0k3/cache-maxxing/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/5m0k3/cache-maxxing/releases/tag/v0.4.0
