@@ -97,11 +97,19 @@ export function costs(rec: Rec): { warm: number; cold: number } | null {
   return { warm: ((rec.prefix - out) * p.read + out * write) / 1e6, cold: (rec.prefix * write) / 1e6 }
 }
 
-// The cache lifetime. Measured (FACTS F37): a subscription's main chat always writes
-// the 1h cache; only subagents write 5m, and the bar ignores them. So `auto` is 1h,
-// never guessed down. shortcut: API-key users pick 5 by hand; the update package brings real per-model TTLs.
+// The cache lifetime before any reply says otherwise. A subscription's main chat writes the 1h
+// cache (F37, F74), so `auto` starts at 1h; ttlFromUsage corrects it from each reply.
 export function ttlFor(setting: Settings['memoryMinutes']): number {
   return setting === 'auto' ? 60 : Number(setting)
+}
+
+// `auto`: the lifetime the reply's cache write actually used (issue #4: API keys, cloud providers and
+// usage credits write 5m). A reply that wrote nothing keeps the chat's previous lifetime.
+export function ttlFromUsage(setting: Settings['memoryMinutes'], u: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }, prev?: number): number {
+  if (setting !== 'auto') return Number(setting)
+  if ((u.ephemeral_1h_input_tokens ?? 0) > 0) return 60
+  if ((u.ephemeral_5m_input_tokens ?? 0) > 0) return 5
+  return prev ?? 60
 }
 
 // Haiku 5.5's cost for a handoff; output is 5x its input rate in both bands (FACTS F48b).
@@ -117,14 +125,21 @@ export const HAIKU_ESTIMATE = { in: 40_000, out: 5_000 }
 
 // The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
 // the rebuild the handoff avoids, minus what Haiku read, wrote and cost.
-// The fresh chat's own first cache write: a median of 9.3K tokens over 890 of your chats (FACTS F47b),
-// plus reading the brief (~4K tokens: briefs ran 13.8-15.6K chars). Priced at the main model's write rate.
+// The fresh chat's own first cache write plus reading the brief (~4K tokens: briefs ran 13.8-15.6K chars),
+// priced at the main model's write rate. Learned from the user's own last 20 fresh chats (median): MCP tools
+// and a big CLAUDE.md can make it ~42K (issue #3). Until 3 are seen: 9.3K, your median over 890 chats (F47b).
 export const FRESH_START_TOKENS = 13_000
+const BRIEF_TOKENS = 4_000
+let freshStart = FRESH_START_TOKENS
+export function setFreshStart(firstWrites: unknown) {
+  const xs = Array.isArray(firstWrites) ? firstWrites.filter((x): x is number => typeof x === 'number' && x >= 0).sort((a, b) => a - b) : []
+  freshStart = xs.length >= 3 ? xs[Math.floor(xs.length / 2)]! + BRIEF_TOKENS : FRESH_START_TOKENS
+}
 
 export function handoffSaving(prefix: number, cold: number, haiku: { in: number; out: number; usd: number } | null) {
-  const startUsd = prefix > 0 ? (cold * FRESH_START_TOKENS) / prefix : 0 // cold is the whole prefix at the write rate
+  const startUsd = prefix > 0 ? (cold * freshStart) / prefix : 0 // cold is the whole prefix at the write rate
   return {
-    tokens: Math.max(0, prefix - (haiku ? haiku.in + haiku.out : 0) - FRESH_START_TOKENS),
+    tokens: Math.max(0, prefix - (haiku ? haiku.in + haiku.out : 0) - freshStart),
     usd: Math.max(0, cold - (haiku?.usd ?? 0) - startUsd),
   }
 }
@@ -196,7 +211,8 @@ function decideBase(rec: Rec, now: number, s: Settings): Verdict {
     const later = dollars ? `, later ≈ ${money(c.cold)}${more}` : `, later ${ratio ? `${ratio}× more` : r ? 'normal cost' : 'much more'}`
     return { light: 'yellow', text: `🟡 ${clock(left)} min left · ${nextWarm}${later}${ctx} · ⏳ Reply soon or try ${HANDOFF}`, shouldPopup: false }
   }
-  const head = `🟢 ${clock(left)} min left · ${nextWarm}${ctx}`
+  // whole minutes, rounded up (your call: seconds ticking distract): never "0 min", and the last green is "16 min" before 🟡 15:00
+  const head = `🟢 ${Math.ceil(left / 60_000)} min left · ${nextWarm}${ctx}`
   if (rec.prefix >= s.longChatTokens) {
     return { light: 'green', text: `${head} · ${SUGGEST_NEW}`, shouldPopup: false }
   }
@@ -218,7 +234,7 @@ export function fromSessionStart(
   i: { secondsSince: number; contextTokens: number; model: string; window?: number },
   now: number, prev: Rec | null, s: Settings,
 ): Rec {
-  const ttlMin = ttlFor(s.memoryMinutes)
+  const ttlMin = ttlFromUsage(s.memoryMinutes, {}, prev?.ttlMin) // nothing new written: the chat's last known lifetime
   return {
     at: now - i.secondsSince * 1000, prefix: i.contextTokens, out: 0, model: i.model, read: 0, write: 0,
     ttlMin, miss5: 0, warned: false, window: i.window ?? prev?.window, isEstimate: true,
@@ -320,8 +336,9 @@ export function statsFromTranscript(jsonl: string, ttlMin: number): Partial<Stat
     try { d = JSON.parse(line) } catch { continue }
     if (d.type === 'system' && typeof d.content === 'string' && /^(?:<local-command-stdout>)?(?:[\w+.-]+: )?Handoff saved to /.test(d.content)) {
       out.handoffs++
-      const m = /You saved approx (\d+(?:\.\d+)?[KM]?) tokens and \$(\d+(?:\.\d+)?)/.exec(d.content)
-      if (m) { out.savedTokens += untokens(m[1]!); out.savedUsd += Number(m[2]) }
+      // "and <$0.01" too: its tokens still count, its dollars as 0
+      const m = /You saved approx (\d+(?:\.\d+)?[KM]?) tokens and (<?)\$(\d+(?:\.\d+)?)/.exec(d.content)
+      if (m) { out.savedTokens += untokens(m[1]!); out.savedUsd += m[2] ? 0 : Number(m[3]) }
       continue
     }
     const u = d.message?.usage
@@ -336,7 +353,7 @@ export function statsFromTranscript(jsonl: string, ttlMin: number): Partial<Stat
     out.write += write
     out.input += u.input_tokens ?? 0
     if (prevAt && Number.isFinite(at) && at - prevAt > ttlMin * 60_000) {
-      const p = priceOf(d.message.model, read + write)
+      const p = priceOf(d.message.model, read + write + (u.input_tokens ?? 0)) // Haiku's tier is by the whole prompt
       out.rebuilds++
       out.rebuildTokens += write
       out.rebuildUsd += p ? (write * p.input * (ttlMin >= 60 ? 2 : 1.25)) / 1e6 : 0
@@ -362,9 +379,11 @@ export function sumStats(chats: unknown[], retired: unknown, now: number): Stats
 // endsWith: dev-sync.sh renames every quoted 'cache-maxxing', so an equality check would flip.
 export const isDevCopy = (name: string) => name.endsWith('-dev')
 
-// /cmaxx-update: "0.10.0" is newer than "0.9.3".
+// /cmaxx-update: "0.10.0" is newer than "0.9.3". A pre-release or build tag ("0.4.1-rc.1", "+build.1")
+// is compared by its numbers only.
 export function newerVersion(a: string, b: string): boolean {
-  const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+  const nums = (v: string) => v.split(/[-+]/)[0]!.split('.').map(Number)
+  const pa = nums(a), pb = nums(b)
   for (let i = 0; i < 3; i++) {
     const x = pa[i] ?? 0, y = pb[i] ?? 0
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false

@@ -3,7 +3,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Rec } from '../types'
-import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, haikuUsd, money, newerVersion, priceOf, sendWarning, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, validatePrices } from '../hooks/logic'
+import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, handoffSaving, haikuUsd, money, newerVersion, priceOf, sendWarning, setFreshStart, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, ttlFromUsage, validatePrices } from '../hooks/logic'
 import { savingsLine } from '../hooks/handoff'
 
 const MIN = 60_000
@@ -63,17 +63,26 @@ test('formats: clock, tokens, money', async () => {
 // --- every bar state, exact text (the contract the docs show) ---------------
 
 test('green, keep going', async () => {
-  expect(decide(rec({ prefix: 50_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  expect(decide(rec({ prefix: 50_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('green, long chat', async () => {
-  expect(decide(rec({ prefix: 320_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.06 · 320K / 1M · 🔄 Try /cmaxx-handoff or a new chat')
+  expect(decide(rec({ prefix: 320_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50 min left · next message ≈ $0.06 · 320K / 1M · 🔄 Try /cmaxx-handoff or a new chat')
 })
 
 test('yellow on 1h cache; 15:00 left is yellow, 15:01 is green', async () => {
   expect(decide(rec(), 57 * MIN, DEFAULTS).text).toBe('🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cmaxx-handoff')
   expect(decide(rec(), 45 * MIN, DEFAULTS).light).toBe('yellow')
   expect(decide(rec(), 45 * MIN - 1_000, DEFAULTS).light).toBe('green')
+})
+
+test('green shows whole minutes, rounded up; yellow keeps the seconds', async () => {
+  expect(decide(rec({ prefix: 50_000 }), 60 * MIN - (47 * MIN + 12_000), DEFAULTS).text.startsWith('🟢 48 min left ·')).toBe(true) // 47:12 left
+  expect(decide(rec({ prefix: 50_000 }), 0, DEFAULTS).text.startsWith('🟢 60 min left ·')).toBe(true) // not "1:00:00"
+  expect(decide(rec({ prefix: 50_000 }), 45 * MIN - 1_000, DEFAULTS).text.startsWith('🟢 16 min left ·')).toBe(true) // 15:01: last green
+  expect(decide(rec({ prefix: 50_000 }), 47 * MIN + 30_000, DEFAULTS).text.startsWith('🟡 12:30 min left ·')).toBe(true)
+  // 5m cache, last second: "1 min", never "0 min"
+  expect(decide(rec({ prefix: 50_000, ttlMin: 5 }), 5 * MIN - 1_000, DEFAULTS).text.startsWith('🟢 1 min left ·')).toBe(true)
 })
 
 test('5m cache never shows yellow', async () => {
@@ -110,12 +119,12 @@ test('compact: reset, usually small and orange', async () => {
 
 test('times style hides dollars', async () => {
   expect(decide(rec(), 72 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🔴 cache expired · next message: 40× more · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens')
-  expect(decide(rec({ prefix: 50_000 }), 10 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going')
+  expect(decide(rec({ prefix: 50_000 }), 10 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🟢 50 min left · next message: normal cost · 50K / 1M · ✅ Keep going')
 })
 
 test('unknown model or window: no dollars, no context field', async () => {
   expect(decide(rec({ model: 'some-new-model' }), 72 * MIN, DEFAULTS).text.includes('$')).toBe(false)
-  expect(decide(rec({ prefix: 50_000, window: undefined }), 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.01 · ✅ Keep going')
+  expect(decide(rec({ prefix: 50_000, window: undefined }), 10 * MIN, DEFAULTS).text).toBe('🟢 50 min left · next message ≈ $0.01 · ✅ Keep going')
 })
 
 test('send warning names the real cause', async () => {
@@ -127,10 +136,19 @@ test('send warning names the real cause', async () => {
 // --- TTL ---------------------------------------------------------------------
 // Auto is always 1h: the main chat never wrote a 5m cache in any measured session (FACTS F37).
 
-test('TTL: auto is always 1h; the setting forces 5 or 60', async () => {
+test('TTL: auto starts at 1h; the setting forces 5 or 60', async () => {
   expect(ttlFor('auto')).toBe(60)
   expect(ttlFor('5')).toBe(5)
   expect(ttlFor('60')).toBe(60)
+})
+
+test('TTL auto follows the reply\'s cache write: 5m on an API key or usage credits (issue #4)', async () => {
+  expect(ttlFromUsage('auto', { ephemeral_1h_input_tokens: 900, ephemeral_5m_input_tokens: 0 })).toBe(60)
+  expect(ttlFromUsage('auto', { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 900 })).toBe(5)
+  expect(ttlFromUsage('auto', {}, 5)).toBe(5) // nothing written: the chat's last known lifetime
+  expect(ttlFromUsage('auto', {})).toBe(60)
+  expect(ttlFromUsage('60', { ephemeral_5m_input_tokens: 900 })).toBe(60) // a forced setting wins
+  expect(fromSessionStart({ secondsSince: 60, contextTokens: 50_000, model: 'claude-opus-5-5' }, 0, rec({ ttlMin: 5 }), DEFAULTS).ttlMin).toBe(5)
 })
 
 // --- older chats -------------------------------------------------------------
@@ -145,7 +163,7 @@ test('older chat filled in from session start: expired 2h ago, red', async () =>
 test('older chat still warm (20 min ago): green with the right time', async () => {
   const now = 10 * 60 * MIN
   const r = fromSessionStart({ secondsSince: 1200, contextTokens: 50_000, model: 'claude-opus-5-5', window: 1_000_000 }, now, null, DEFAULTS)
-  expect(decide(r, now, DEFAULTS).text).toBe('🟢 40:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  expect(decide(r, now, DEFAULTS).text).toBe('🟢 40 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('older chat: "likely expired" after 10 min no longer shrinks the TTL to 5m', async () => {
@@ -154,7 +172,7 @@ test('older chat: "likely expired" after 10 min no longer shrinks the TTL to 5m'
 })
 
 test('sleep: countdown is wall-clock based', async () => {
-  expect(decide(rec(), 10 * MIN, DEFAULTS).text.startsWith('🟢 50:00 min left')).toBe(true)
+  expect(decide(rec(), 10 * MIN, DEFAULTS).text.startsWith('🟢 50 min left')).toBe(true)
   expect(decide(rec(), 180 * MIN, DEFAULTS).text.startsWith('🔴 cache expired')).toBe(true)
 })
 
@@ -242,6 +260,28 @@ test('versions compare as numbers', () => {
   expect(newerVersion('0.3.9', '0.4.0')).toBe(false)
   expect(newerVersion('1.0', '0.9.9')).toBe(true)
   expect(newerVersion('x', '0.1.0')).toBe(false)
+  expect(newerVersion('0.4.1+build.1', '0.4.0')).toBe(true) // issue #6
+  expect(newerVersion('0.5.0-rc.1', '0.4.0')).toBe(true)
+  expect(newerVersion('0.4.0', '0.4.0+build.2')).toBe(false)
+})
+
+test('transcript: a "<$0.01" saving keeps its tokens; the Haiku tier counts uncached input (issue #6)', () => {
+  const note = row({ type: 'system', content: 'Handoff saved to x.md. This command never resent the chat to Haiku: no cache read, no rebuild. You saved approx 12K tokens and <$0.01.' })
+  expect(statsFromTranscript(note, 60)).toMatchObject({ handoffs: 1, savedTokens: 12_000, savedUsd: 0 })
+  // 98K cached + 3K uncached = 101K: the 5x tier
+  const h = (id: string, at: string) => row({ type: 'assistant', timestamp: at, message: { id, model: 'claude-haiku-5-5', usage: { input_tokens: 3_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 98_000, output_tokens: 1 } } })
+  const s = statsFromTranscript([h('a', '2026-11-17T10:00:00Z'), h('b', '2026-11-17T12:00:00Z')].join('\n'), 60)
+  expect(Math.abs(s.rebuildUsd! - (98_000 * 0.1 * 5 * 2) / 1e6) < 1e-9).toBe(true)
+})
+
+test('handoff saving: the fresh chat\'s size is learned from the user\'s own first replies (issue #3)', () => {
+  // 228K expired on Opus 5.5, Haiku 45K: the default 13K start
+  expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(170_000)
+  setFreshStart([42_000, 40_000, 44_000]) // median 42K + 4K brief read
+  expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(137_000)
+  setFreshStart([90_000, 'x', -1]) // under 3 good samples: back to the default
+  expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(170_000)
+  setFreshStart(undefined)
 })
 
 test('a downloaded price table is refused unless it is sane and not older than the bundled one', () => {
@@ -262,10 +302,10 @@ test('a downloaded price table is refused unless it is sane and not older than t
 
 test('an unknown model nudges to /cmaxx-update until a downloaded price covers it', () => {
   const r = rec({ model: 'claude-opus-6', prefix: 50_000 })
-  expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going · new model? try /cmaxx-update')
+  expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50 min left · next message: normal cost · 50K / 1M · ✅ Keep going · new model? try /cmaxx-update')
   setPriceOverride({ 'opus-6': [5, 0.5] })
   try {
-    expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
+    expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
     expect(priceOf('claude-opus-5-5', 1)).toEqual({ input: 4, read: 0.2 }) // bundled prices still apply to the rest
   } finally {
     setPriceOverride(null)

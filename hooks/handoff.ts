@@ -14,7 +14,11 @@ const MAX_TOOL_INPUT = 300
 const MAX_LAST_MESSAGE = 4_000 // a pasted log must not flood Haiku's prompt or the saved file
 
 // Harness messages that arrive as user rows but are never the user's own words.
-const META_PREFIXES = ['Stop hook feedback', '[Image', '<system-reminder>', '<command-name>', '<local-command', '<task-notification>', 'Read .claude/handoffs/']
+const META_PREFIXES = ['Stop hook feedback', '<system-reminder>', '<command-name>', '<local-command', '<task-notification>']
+// Whole rows only: "[Image #1] stop, review this" and a message quoting a handoff path are the user's (issue #2).
+const META_ROWS = [/^(?:\[Image[^\]]*\]\s*)+$/, /^Read \.claude\/handoffs\/\S+\.md and continue from where we left off\.$/]
+// The two sections a new chat can't do without: a reply holding only "Handoff Confidence" is no brief (issue #1).
+const REQUIRED_SECTIONS = ['## Last Request from the User', '## Next Steps']
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const GIT_COMMIT_OUTPUT = /^\[[\w./-]+(?: \(root-commit\))? ([0-9a-f]{7,})\] (.+)$/m
 // `git commit -q` prints no "[main abc1234]" line, so its subject comes from -m (quotes may hold & or ;)
@@ -26,6 +30,7 @@ export type Numbers = { tokens?: number; window?: number; model?: string; bar?: 
 
 // The three "# " parts of hooks/handoff-skill.md, by name.
 export function parseSkill(md: string): Skill {
+  md = md.replace(/\r\n/g, '\n') // Git for Windows checks out CRLF (issues #9, #10)
   const part = (name: string) => {
     const m = new RegExp(`^# ${name}[ \\t]*\\n([\\s\\S]*?)(?=^# |(?![\\s\\S]))`, 'm').exec(md)
     if (!m?.[1]?.trim()) throw new Error(`handoff-skill.md has no "# ${name}" part`)
@@ -38,7 +43,7 @@ export function parseSkill(md: string): Skill {
 export function userText(m: SessionMessage): string | undefined {
   if (m.role !== 'user') return undefined
   const raw = m.text.trim()
-  return raw && !META_PREFIXES.some(p => raw.startsWith(p)) ? raw : undefined
+  return raw && !META_PREFIXES.some(p => raw.startsWith(p)) && !META_ROWS.some(r => r.test(raw)) ? raw : undefined
 }
 
 export function extractFacts(messages: readonly SessionMessage[]): Facts {
@@ -58,7 +63,8 @@ export function extractFacts(messages: readonly SessionMessage[]): Facts {
       const out = typeof t.text === 'string' ? t.text.match(GIT_COMMIT_OUTPUT) : null
       const quiet = out ? null : t.input.command.match(QUIET_COMMIT)?.[1]
       const msg = quiet && /(?:^|\s)(?:-q|--quiet)\b/.test(quiet) && !/nothing to commit/.test(`${t.text ?? ''}`) ? quiet.match(/-m\s+(["'])(.*?)\1/)?.[2] : undefined
-      const subject = out ? `${out[2]} (${out[1]})` : msg
+      // from the command alone: `false && git commit -q …` exits 0 with no commit (issue #2)
+      const subject = out ? `${out[2]} (${out[1]})` : msg && `${msg} (no git output: unverified)`
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
@@ -85,7 +91,7 @@ export function renderTranscript(messages: readonly SessionMessage[]): string {
 
 const list = (items: string[]) => (items.length ? items.map(i => `- ${i}`).join('\n') : 'None.')
 
-export function factsBlock(f: Facts, n: Numbers, withLastMessage = true): string {
+export function factsBlock(f: Facts, n: Numbers): string {
   const nums = [
     n.tokens !== undefined && `- **Chat size:** ${n.tokens} tokens${n.window ? ` of a ${n.window} window` : ''}`,
     n.model && `- **Model:** ${n.model}`,
@@ -102,7 +108,7 @@ ${list(f.commits)}
 
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
-  return withLastMessage ? `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : all
+  return `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}`
 }
 
 // Instructions sit in `system`; here the data comes first and one closing line last.
@@ -110,11 +116,8 @@ export function briefPrompt(messages: readonly SessionMessage[], f: Facts, n: Nu
   return `# Extracted Facts\n${factsBlock(f, n)}\n\n# Conversation\n${renderTranscript(messages)}\n\n---\n\n${closing}`
 }
 
-/** The "## " headings the brief asks for. */
-export const sectionHeadings = (brief: string) => [...brief.matchAll(/^## (.+)$/gm)].map(m => `## ${m[1]!.trim()}`)
-
-/** A reply holding none of the sections is a fragment, not a brief. */
-export const isValidBrief = (text: string, brief: string) => sectionHeadings(brief).some(h => text.includes(h))
+/** A reply without the last request and the next steps is a fragment, not a brief. */
+export const isValidBrief = (text: string) => REQUIRED_SECTIONS.every(h => text.includes(h))
 
 /** Whether the brief's last-request section says it is not (fully) answered. */
 export function hasUnansweredLastRequest(text: string): boolean {
@@ -145,8 +148,8 @@ export function assembleBrief(ctx: Ctx, f: Facts, n: Numbers, haiku: string | un
 - **Previous chat:** ${ctx.sessionId}
 - **Transcript (grep it, never read it whole):** \`${ctx.transcript}\`
 - **How this was written:** ${haiku ? 'Haiku wrote the judgment sections from the conversation, abbreviated (long messages cut, tool output left out). They are a model\'s summary of the chat, not the user\'s own words. The facts at the end came from the tool calls, in code.' : 'Haiku did not return a usable brief, so this holds only the facts extracted in code. Grep the transcript for the rest.'}`
-  // a usable brief already quotes the last request in its own section
-  return `${[header, haiku?.trim(), factsBlock(f, n, !haiku)].filter(Boolean).join('\n\n')}\n`
+  // the user's own last words always: Haiku's section may paraphrase them (issue #1)
+  return `${[header, haiku?.trim(), factsBlock(f, n)].filter(Boolean).join('\n\n')}\n`
 }
 
 /** Claude Code keeps transcripts under the folder with every non-alphanumeric character as '-'. */

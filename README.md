@@ -112,7 +112,7 @@ From top to bottom, the first rule that fits:
 6. Otherwise: 🟢 keep going.
 
 ```
-🟢 47:12 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going
+🟢 48 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going
 🟡 12:30 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cmaxx-handoff
 🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cmaxx-handoff to save 232K tokens | $2.21
 ```

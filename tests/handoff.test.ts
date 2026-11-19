@@ -5,7 +5,7 @@ import type { SessionMessage } from 'claude-code'
 
 import {
   assembleBrief, extractFacts, factsBlock, fenced, handoffPath, hasUnansweredLastRequest, isValidBrief,
-  parseSkill, renderTemplate, renderTranscript, savingsLine, sectionHeadings, userText,
+  parseSkill, renderTemplate, renderTranscript, savingsLine, userText,
 } from '../hooks/handoff'
 
 const user = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
@@ -43,8 +43,12 @@ test('skill: the three parts are found by name; a missing part is an error', asy
   expect(s.brief.includes('# Closing line')).toBe(false)
   expect(s.closing).toBe('Write it now.')
   expect(s.nextChat.includes('{{#priority}}')).toBe(true)
-  expect(sectionHeadings(s.brief)).toEqual(['## Handoff Confidence', '## Last Request from the User'])
+  expect(s.brief).toContain('## Last Request from the User')
   expect(() => parseSkill('# Final brief\nx')).toThrow()
+})
+
+test('skill: CRLF line endings (Git for Windows) parse the same as LF (issues #9, #10)', async () => {
+  expect(parseSkill(SKILL_MD.replace(/\n/g, '\r\n'))).toEqual(parseSkill(SKILL_MD))
 })
 
 test('facts: edited files, commits from git output only, issues, last real user message', async () => {
@@ -62,7 +66,18 @@ test('facts: edited files, commits from git output only, issues, last real user 
     user('<system-reminder>not the user</system-reminder>'),
     user('<command-name>/model</command-name>'),
   ])
-  expect(f).toEqual({ filesModified: ['hooks/a.ts'], commits: ['Fix the bar (abc1234)', 'Quiet: a & b'], issues: ['#42'], lastUserMessage: 'fix #42 please' })
+  expect(f).toEqual({ filesModified: ['hooks/a.ts'], commits: ['Fix the bar (abc1234)', 'Quiet: a & b (no git output: unverified)'], issues: ['#42'], lastUserMessage: 'fix #42 please' })
+})
+
+test('a commit that never ran is marked unverified, not listed as fact (issue #2)', async () => {
+  const f = extractFacts([asst('', [tool('Bash', { command: 'false && git commit -q -m "Ship release" || true' }, '')])])
+  expect(f.commits).toEqual(['Ship release (no git output: unverified)'])
+})
+
+test('a message starting with an image or quoting a handoff path is the user\'s; image-only rows are not (issue #2)', async () => {
+  const f = extractFacts([user('implement the change'), user('[Image #1] stop, just review this screenshot'), user('[Image #2] [Image #3]')])
+  expect(f.lastUserMessage).toBe('[Image #1] stop, just review this screenshot')
+  expect(userText(user('Read .claude/handoffs/ first, then tell me what is there'))).toBe('Read .claude/handoffs/ first, then tell me what is there')
 })
 
 test('harness rows are labelled, never taken for the user; the seed line is not a request', async () => {
@@ -98,10 +113,11 @@ test('numbers come from the bar record; none known says unknown', async () => {
   expect(factsBlock(f, {})).toContain('## Last Real User Message (verbatim)\nNone found.')
 })
 
-test('brief check: a reply with none of the sections is not a brief', async () => {
-  const brief = parseSkill(SKILL_MD).brief
-  expect(isValidBrief('## Handoff Confidence\nHigh', brief)).toBe(true)
-  expect(isValidBrief('Sure! Here is a summary.', brief)).toBe(false)
+test('brief check: needs the last request and the next steps; a stub is not a brief (issue #1)', async () => {
+  expect(isValidBrief('## Handoff Confidence\nHigh')).toBe(false)
+  expect(isValidBrief('## Handoff Confidence\nHigh\n\n## Last Request from the User\nx')).toBe(false)
+  expect(isValidBrief('## Last Request from the User\nx\n\n## Next Steps\n1. y')).toBe(true)
+  expect(isValidBrief('Sure! Here is a summary.')).toBe(false)
 })
 
 test('priority switch: on for Not answered or Partially answered, off for Answered', async () => {
@@ -113,7 +129,7 @@ test('priority switch: on for Not answered or Partially answered, off for Answer
   expect(renderTemplate('{{#p}}A{{/p}}{{^p}}B{{/p}}', { p: false })).toBe('B')
 })
 
-test('the saved file: instructions, header with transcript, brief, facts; facts-only when Haiku failed', async () => {
+test('the saved file: instructions, header with transcript, brief, facts with the last message always; facts-only when Haiku failed', async () => {
   const skill = parseSkill(SKILL_MD)
   const f = { filesModified: ['a.ts'], commits: [], issues: [], lastUserMessage: 'do x' }
   const ctx = { sessionId: 'chat-1', transcript: '~/t.jsonl', skill }
@@ -124,7 +140,7 @@ test('the saved file: instructions, header with transcript, brief, facts; facts-
   expect(ok).toContain('`~/t.jsonl`')
   expect(ok).toContain('## Handoff Confidence')
   expect(ok).toContain('- a.ts')
-  expect(ok.includes('## Last Real User Message')).toBe(false) // the brief quotes it already
+  expect(ok).toContain('## Last Real User Message (verbatim)\ndo x') // kept even when the brief quotes it (issue #1)
   const bare = assembleBrief(ctx, f, {}, undefined)
   expect(bare).toContain('Confirm in two sentences.')
   expect(bare).toContain('Haiku did not return a usable brief')

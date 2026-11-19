@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+- The 🟢 countdown shows whole minutes (`48 min left`), rounded up, so it no longer ticks every second; from 🟡 on it still shows minutes and seconds.
+- Memory time `auto` follows each reply's own cache write: 1 hour on a subscription, 5 minutes with an API key, a cloud provider or usage credits (#4).
+- The 🔴 tip's handoff saving uses the size of your own fresh chats (median first cache write of your last 20), not a fixed 13K (#3).
+
+### Fixed
+- `/cmaxx-handoff` failed on Windows: the skill file is read with CRLF line endings too, and `.gitattributes` keeps LF on checkout (#9, #10).
+- `/cmaxx-handoff` accepts Haiku's brief only if it has the last request and the next steps, and the briefing always keeps your last message word for word (#1).
+- `/cmaxx-handoff` kept messages that start with an image or quote a handoff path; a commit seen only in the command is marked unverified (#2).
+- A second handoff of the same expired chat no longer adds a second saving to `/cmaxx-stats` (#3).
+- On resume, the countdown no longer starts at the end of the last reply instead of its start (#4).
+- A compact reported as 0 tokens no longer shows a free rebuild; `/cmaxx-stats` counts a rebuild when a reply reads far less than the chat while the cache should be warm (#5).
+- `/cmaxx-stats`: a failed write keeps the turn's counts; a new chat is never re-read from its transcript later; a "<$0.01" handoff saving keeps its tokens; Haiku's price tier counts uncached input (#6).
+- `/cmaxx-update`: an older price download never replaces newer saved prices; versions with a pre-release or build tag compare correctly (#6).
+
 ## [0.4.0] - first public release
 
 ### Added

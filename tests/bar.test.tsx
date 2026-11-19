@@ -15,11 +15,11 @@ const BAR = { plugin: 'cache-maxxing', component: 'AbovePrompt', props: { hasSur
 type Body = Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>
 type On = Parameters<Body>[1]
 type Dollar = Parameters<Body>[0]
-type Usage = { read: number; write: number; out?: number; model?: string }
+type Usage = { read: number; write: number; out?: number; model?: string; ttl?: 5 | 60 } // ttl: the lifetime the write reports
 
 // The engine beneath the plugin (one chat, Opus 5.5, 1M window). Every stand-in is
 // registered here, before the test's first call on $, as the kit requires.
-function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown; streamMs?: number; brokenStore?: boolean; now?: number } = {}) {
+function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown; streamMs?: number; brokenStore?: boolean; now?: number; contextTokens?: number } = {}) {
   const clock = mock.clock(on, { now: opts.now ?? T0 })
   if (opts.brokenStore) for (const k of ['store.get', 'store.set', 'store.delete', 'store.keys'] as const) on(k, () => { throw new Error('store broken') })
   else mock.store(on, opts.store)
@@ -28,7 +28,7 @@ function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown
   const steps = { n: 0 } // main-model requests the engine saw
   on('session.id', () => ({ value: 'chat-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('session.usage', () => ({ value: { startedAt: T0, context: { window: 1_000_000 } } }) as never)
+  on('session.usage', () => ({ value: { startedAt: T0, context: { window: 1_000_000, ...(opts.contextTokens !== undefined ? { tokens: opts.contextTokens } : {}) } } }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('classic.SessionStart', () => ({}))
@@ -44,7 +44,8 @@ function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown
     if (opts.streamMs) await clock.advance(opts.streamMs)
     return {
       turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn',
-      usage: { input_tokens: 0, output_tokens: usage.out ?? 0, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, model: usage.model ?? 'claude-opus-5-5' },
+      usage: { input_tokens: 0, output_tokens: usage.out ?? 0, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, model: usage.model ?? 'claude-opus-5-5',
+        ...(usage.ttl ? { ephemeral_5m_input_tokens: usage.ttl === 5 ? usage.write : 0, ephemeral_1h_input_tokens: usage.ttl === 60 ? usage.write : 0 } : {}) },
     }
   })
   return {
@@ -89,14 +90,14 @@ test('after a reply: green with the countdown, identical on desktop, vscode, ter
   await start($)
   await w.reply($, { read: 45_000, write: 5_000 })
   await w.clock.advance(10 * MIN)
-  await expectBar($, '🟢 50:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 50 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('countdown starts at the request, not the end of a 3-minute reply', async ($, on) => {
   const w = engine(on, { streamMs: 3 * MIN })
   await start($)
   await w.reply($, { read: 50_000, write: 0 })
-  await expectBar($, '🟢 57:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 57 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('subagent steps do not move the clock', async ($, on) => {
@@ -105,7 +106,7 @@ test('subagent steps do not move the clock', async ($, on) => {
   await w.reply($, { read: 50_000, write: 0 })
   await w.clock.advance(30 * MIN)
   await w.reply($, { read: 900_000, write: 0 }, 'agent-7')
-  await expectBar($, '🟢 30:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 30 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('ticks to yellow, then red, with exactly one pop-up', async ($, on) => {
@@ -144,7 +145,7 @@ test('after model switches and a compact, the next reply counts down from a full
   await w.clock.advance(20 * MIN)
   await $.classic.SessionStart({ source: 'compact', session_id: 'chat-1', seconds_since_last_response: 1200, context_tokens: 30_000, prompt_cache_likely_expired: true, model: 'claude-opus-5-5' } as never)
   await w.reply($, { read: 0, write: 30_000 })
-  await expectBar($, '🟢 1:00:00 min left · next message ≈ <$0.01 · 30K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 60 min left · next message ≈ <$0.01 · 30K / 1M · ✅ Keep going')
 })
 
 test('compact resets the cache at once', async ($, on) => {
@@ -174,7 +175,7 @@ test('app restart: the saved record brings the bar back before any reply', async
   const saved = { at: T0 - 10 * MIN, prefix: 50_000, out: 0, model: 'claude-opus-5-5', read: 50_000, write: 0, ttlMin: 60, miss5: 0, warned: false, window: 1_000_000 }
   engine(on, { store: { 'cmx:chat-1': saved } })
   await start($)
-  await expectBar($, '🟢 50:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 50 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('a malformed record from an older version is ignored, never NaN', async ($, on) => {
@@ -461,7 +462,7 @@ test('a broken store never costs the commands, the bar or the pop-up', async ($,
   expect(w.commands).toEqual(['cmaxx', 'cmaxx-handoff', 'cmaxx-update', 'cmaxx-stats'])
   await w.reply($, { read: 290_000, write: 0 })
   await w.clock.advance(MIN)
-  await expectBar($, '🟢 59:00 min left · next message ≈ $0.06 · 290K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 59 min left · next message ≈ $0.06 · 290K / 1M · ✅ Keep going')
   await w.clock.advance(61 * MIN)
   expect(w.toasts.filter(t => t.includes('🔴 cache expired')).length).toBe(1)
 })
@@ -624,7 +625,7 @@ test('update, same version: only this repo\'s files are read, and a new model is
   expect(u.calls.argv).toEqual([])
   expect(u.calls.urls.every(x => x.startsWith('https://raw.githubusercontent.com/5m0k3/cache-maxxing/main/'))).toBe(true)
   await u.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
-  await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 60 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
   expect(await runUpdate($)).toContain('Prices: up to date (2026-12-02).')
 })
 
@@ -655,14 +656,14 @@ test('update: a refused price table leaves the prices as they were', async ($, o
   await start($)
   expect(await runUpdate($)).toContain('Prices not changed: the downloaded table was refused (bad price for opus-5-5).')
   await u.reply($, { read: 50_000, write: 0 })
-  await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 60 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
 test('prices saved by an earlier /cmaxx-update are used after a restart', async ($, on) => {
   const w = engine(on, { store: { prices: { sourceDate: '2026-12-02', prices: { 'opus-6': [5, 0.5] } } } })
   await start($)
   await w.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
-  await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
+  await expectBar($, '🟢 60 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
 })
 
 // --- final-review fixes ------------------------------------------------------------
@@ -720,6 +721,76 @@ test('a downloaded table dated like the built-in one never overrides it', async 
   const u = updateEngine(on, { store: { prices: same }, prices: same })
   await start($)
   await u.reply($, { read: 50_000, write: 0 })
-  await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going') // bundled $4/$0.20, not $9
+  await expectBar($, '🟢 60 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going') // bundled $4/$0.20, not $9
   expect(await runUpdate($)).toContain(`Prices: up to date (${PRICES_DATE}).`)
+})
+
+// --- 0.4.x: GitHub issues #3, #4, #5, #6 -----------------------------------------------
+test('API key or usage credits: a reply that wrote the 5m cache counts down 5 minutes (issue #4)', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 0, write: 50_000, ttl: 5 })
+  await expectBar($, '🟢 5 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+  await w.clock.advance(2 * MIN)
+  await w.reply($, { read: 50_000, write: 0 }) // wrote nothing: keeps the 5 minutes
+  await w.clock.advance(6 * MIN)
+  await expectBar($, '🟠 cache expired · next message ≈ $0.25 (25× more) · 50K / 1M · Small chat, fine to keep going')
+})
+
+test('resume: the exact record beats the session-start estimate of the same reply (issue #4)', async ($, on) => {
+  const w = engine(on, { streamMs: 3 * MIN })
+  await start($)
+  await w.reply($, { read: 45_000, write: 5_000 }) // started at T0, ended 3 min later
+  await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 0, context_tokens: 50_000, model: 'claude-opus-5-5' } as never)
+  await expectBar($, '🟢 57 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+})
+
+test('the 🔴 saving uses the size of your own fresh chats, learned from their first replies (issue #3)', async ($, on) => {
+  const w = engine(on, { store: { fresh: [40_000, 44_000] } })
+  on('fs.stat', () => { throw new Error('ENOENT') })
+  await start($)
+  await $.classic.SessionStart({ source: 'startup', session_id: 'chat-1', transcript_path: '/t/chat-1.jsonl', model: 'claude-opus-5-5' } as never)
+  await w.reply($, { read: 0, write: 42_000 })
+  await w.reply($, { read: 42_000, write: 186_000 })
+  await w.clock.advance(70 * MIN)
+  // 228K - 45K Haiku estimate - (42K median of 40K, 44K and this chat's 42K + 4K brief) = 137K; two samples would fall back to 13K: 170K
+  expect((await bars($))[0]).toContain('🔄 Try /cmaxx-handoff to save 137K tokens')
+})
+
+test('stats: a second handoff of the same expired chat counts no second saving (issue #3)', async ($, on) => {
+  const h = handoffEngine(on)
+  await start($, 'vscode')
+  await h.reply($, { read: 228_000, write: 0 })
+  await h.clock.advance(70 * MIN)
+  await handoff($)
+  await handoff($)
+  const t = await stats($)
+  expect(t).toContain('| Handoffs | 2 | 2 |')
+  expect(t).toContain('| Tokens saved | 174K | 174K |')
+})
+
+test('compact: a 0 from the engine is not a free rebuild (issue #5)', async ($, on) => {
+  const w = engine(on, { contextTokens: 0 })
+  await start($)
+  await w.reply($, { read: 228_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never)
+  await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small chat, fine to keep going')
+})
+
+test('stats: a warm reply that read under half the chat paid for a rebuild with no event (issue #5)', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 228_000, write: 0 })
+  await w.clock.advance(5 * MIN)
+  await w.reply($, { read: 0, write: 228_000 }) // effort or tools changed, old images cleared: the cache was dropped
+  expect(await stats($)).toContain('| Cold rebuilds paid | 1 (228K tokens, $1.82) |')
+})
+
+test('update: an older download never replaces newer prices saved earlier (issue #6)', async ($, on) => {
+  const newer = { sourceDate: '2026-12-05', prices: { 'opus-5-5': [4, 0.2], 'opus-6': [8, 0.8] } } // the download says [5, 0.5]
+  const u = updateEngine(on, { store: { prices: newer } }) // the download is dated 2026-12-02
+  await start($)
+  expect(await runUpdate($)).toContain('Prices: up to date (2026-12-05).')
+  await u.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
+  await expectBar($, '🟢 60 min left · next message ≈ $0.04 · 50K / 1M · ✅ Keep going')
 })
