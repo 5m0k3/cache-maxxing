@@ -418,7 +418,7 @@ export const register: Register = (on, options) => {
       const usable = r.isAnswered && r.text.trim() && isValidBrief(r.text) ? r.text : undefined
       // why a brief is facts only, with Haiku's token counts: out at the cap means it ran out of room
       const problem = usable ? undefined : !r.isAnswered ? `Haiku ${r.reason}` : `Haiku's reply had ${r.text.trim() ? 'none of the sections' : 'no text'}, in ${r.usage.input_tokens} / out ${r.usage.output_tokens} of 64000 tokens`
-      const transcript = transcriptPath ?? transcriptGuess(await $.session.cwd(), sessionId)
+      const transcript = transcriptPath ?? transcriptGuess(await $.session.cwd(), sessionId, await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined))
       const path = handoffPath(now, sessionId)
       await $.fs.write(path, assembleBrief({ sessionId, transcript, skill }, facts, nums, usable))
       // briefs quote the chat: the folder ignores itself so `git add -A` never picks them up

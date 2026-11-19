@@ -5,7 +5,7 @@ import type { SessionMessage } from 'claude-code'
 
 import {
   assembleBrief, extractFacts, factsBlock, fenced, handoffPath, hasUnansweredLastRequest, isValidBrief,
-  parseSkill, renderTemplate, renderTranscript, savingsLine, userText,
+  parseSkill, renderTemplate, renderTranscript, savingsLine, transcriptGuess, userText,
 } from '../hooks/handoff'
 
 const user = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
@@ -161,6 +161,11 @@ test('old-chat line: short while warm; once expired, approx saving = rebuild −
 
 test('one file per handoff, by date to the second and chat id', async () => {
   expect(handoffPath(new Date(2026, 10, 16, 22, 5, 7).getTime(), 'ab754061-473c')).toBe('.claude/handoffs/2026-11-16-220507-ab754061.md')
+})
+
+test('transcript fallback: under CLAUDE_CONFIG_DIR when set, else ~/.claude', async () => {
+  expect(transcriptGuess('/Users/me/src/app', 'ab75')).toBe('~/.claude/projects/-Users-me-src-app/ab75.jsonl')
+  expect(transcriptGuess('/Users/me/src/app', 'ab75', '/Users/me/.claude-work/')).toBe('/Users/me/.claude-work/projects/-Users-me-src-app/ab75.jsonl')
 })
 
 test('quoted text cannot forge a user turn: each message sits in a fence longer than its own backticks', async () => {
