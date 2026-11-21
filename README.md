@@ -6,7 +6,7 @@
 
 **See when Claude's prompt cache expires, and what your next message will cost, before you send it.**
 
-[![version](https://img.shields.io/badge/version-0.4.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.5.1-blue)](CHANGELOG.md)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-orange)](https://code.claude.com/docs/en/discover-plugins)
 
@@ -130,12 +130,16 @@ Costs are estimates at standard API list prices, and a floor: a reply that uses 
 ## Limitations
 
 - If your organization blocks Haiku, `/cmaxx-handoff` writes a facts-only briefing that keeps your last message, and says why.
-- The handoff's saving is an estimate: Haiku's share and a fresh chat's start are taken from measured medians, priced as Claude Haiku 5.5.
+- The handoff's saving is an estimate: Haiku's share, the brief and a fresh chat's start are learned from your own handoffs and fresh chats (medians), priced as Claude Haiku 5.5. After `/compact` the bar estimates the chat's new size the same way until the next reply.
 - Switching model and back within the hour shows "cache reset", although the first model's cache may still be warm.
 - `/cmaxx-stats` reads an older chat's history from its transcript only up to 4 MiB; a bigger chat that started before you installed the plugin is counted from when the plugin first saw it.
 - A brand-new chat in the desktop app shows the bar only after your first message: the app starts the chat, and its plugins, at that point.
 
 ## FAQ
+
+**Why no cache warmer?**  
+Anthropic's Consumer Terms bar access by "automated or non-human means" unless via an API key or explicitly permitted, and its Claude Code terms assume "ordinary, individual usage". A background keep-alive ping isn't clearly allowed by either, and accounts can be suspended "without notice", so we won't risk yours.  
+Use /cmaxx-handoff instead: a small fresh chat with the context of old one.  
 
 **Does it cost anything to run?** The bar, no. `/cmaxx-handoff` makes one small Haiku call, typically about a cent at API prices.
 

@@ -118,25 +118,55 @@ export function haikuUsd(inTok: number, outTok: number): number {
   return (inTok * p.input + outTok * p.input * 5) / 1e6
 }
 
-// What a handoff costs before it runs. Estimate: the chat sent to Haiku is capped at 150,000
-// chars (~37.5K tokens) plus facts and instructions; briefs ran 13.8-15.6K chars (F46, F47).
-// Four real handoffs used 12K-46K in+out, so this is the top: the bar never promises more than the notice reports.
+// Sizes learned from the user's own chats, the median of the last 20 samples in the store key of the
+// same name, so no figure measured on one setup is applied to everyone (your call 2026-11-21, issue #11).
+// The defaults below hold only until the first sample (fresh: the third; first chats vary):
+// - fresh: a fresh chat's first cache write; MCP tools and a big CLAUDE.md can make it ~42K (issue #3).
+//   Default 9K: your median over 890 chats was 9.3K (F47b)
+// - brief: the handoff brief the fresh chat reads, its chars / 4 (an estimate). Default 4K: briefs ran 13.8-15.6K chars
+// - haiku: [in, out] of each handoff's Haiku call. Default 40K / 5K: the top of four early handoffs (F46, F47)
+// - compact: the first request after a /compact minus the summary's chars / 4, i.e. system, tools and the
+//   files Claude Code re-attaches (F77: 49K-76K for you). Default: the fresh-chat start, else 20K
 export const HAIKU_ESTIMATE = { in: 40_000, out: 5_000 }
+export type Learned = 'fresh' | 'brief' | 'haiku' | 'compact'
+let fresh: number | undefined
+let brief: number | undefined
+let compactAdd: number | undefined
+let haikuLearned: { in: number; out: number } | undefined
 
-// The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
-// the rebuild the handoff avoids, minus what Haiku read, wrote and cost.
-// The fresh chat's own first cache write plus reading the brief (~4K tokens: briefs ran 13.8-15.6K chars),
-// priced at the main model's write rate. Learned from the user's own last 20 fresh chats (median): MCP tools
-// and a big CLAUDE.md can make it ~42K (issue #3). Until 3 are seen: 9.3K, your median over 890 chats (F47b).
-export const FRESH_START_TOKENS = 13_000
-const BRIEF_TOKENS = 4_000
-let freshStart = FRESH_START_TOKENS
-export function setFreshStart(firstWrites: unknown) {
-  const xs = Array.isArray(firstWrites) ? firstWrites.filter((x): x is number => typeof x === 'number' && x >= 0).sort((a, b) => a - b) : []
-  freshStart = xs.length >= 3 ? xs[Math.floor(xs.length / 2)]! + BRIEF_TOKENS : FRESH_START_TOKENS
+function median(xs: unknown[], min: number): number | undefined {
+  const ok = xs.filter((x): x is number => typeof x === 'number' && x >= 0).sort((a, b) => a - b)
+  return ok.length >= min ? ok[Math.floor(ok.length / 2)] : undefined
 }
 
+export function setLearned(name: Learned, samples: unknown) {
+  const xs: unknown[] = Array.isArray(samples) ? samples : []
+  if (name === 'haiku') {
+    const pairs = xs.filter((p): p is unknown[] => Array.isArray(p))
+    const i = median(pairs.map(p => p[0]), 1)
+    const o = median(pairs.map(p => p[1]), 1)
+    haikuLearned = i !== undefined && o !== undefined ? { in: i, out: o } : undefined
+  } else if (name === 'fresh') fresh = median(xs, 3)
+  else if (name === 'brief') brief = median(xs, 1)
+  else compactAdd = median(xs, 1)
+}
+
+/** What the bar assumes a handoff's Haiku call uses, before it runs. */
+export function haikuEstimate() {
+  const h = haikuLearned ?? HAIKU_ESTIMATE
+  return { ...h, usd: haikuUsd(h.in, h.out) }
+}
+
+/** The chat's size right after /compact: the summary plus what comes back with it, never above the size before. */
+export function compactPrefix(summaryChars: number, before: number): number {
+  return Math.min(before, Math.round(summaryChars / 4) + (compactAdd ?? fresh ?? 20_000))
+}
+
+// The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
+// the rebuild the handoff avoids, minus what Haiku read, wrote and cost, and minus the fresh chat's
+// start plus reading the brief, priced at the main model's write rate.
 export function handoffSaving(prefix: number, cold: number, haiku: { in: number; out: number; usd: number } | null) {
+  const freshStart = (fresh ?? 9_000) + (brief ?? 4_000)
   const startUsd = prefix > 0 ? (cold * freshStart) / prefix : 0 // cold is the whole prefix at the write rate
   return {
     tokens: Math.max(0, prefix - (haiku ? haiku.in + haiku.out : 0) - freshStart),
@@ -199,7 +229,7 @@ function decideBase(rec: Rec, now: number, s: Settings): Verdict {
 
   if (left <= 0 || rec.resetBy) {
     const head = `${rec.resetBy ? RESET_LABEL[rec.resetBy] : 'cache expired'} · ${nextCold}${ctx}`
-    const save = handoffSaving(rec.prefix, c?.cold ?? 0, { ...HAIKU_ESTIMATE, usd: haikuUsd(HAIKU_ESTIMATE.in, HAIKU_ESTIMATE.out) })
+    const save = handoffSaving(rec.prefix, c?.cold ?? 0, haikuEstimate())
     // nothing to show as saved (a rebuild barely above the limit): the plain suggestion
     const suggest = save.tokens > 0 && save.usd > 0 ? `🔄 Try ${HANDOFF} to save ${tokens(save.tokens)} tokens${dollars ? ` | ${money(save.usd)}` : ''}` : SUGGEST_NEW
     return isBigRebuild

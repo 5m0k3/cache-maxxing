@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-21
+
+Thanks to @sircoderin (#11) for the report with the transcript figures that pinned it down.
+
+### Fixed
+- After `/compact` the bar kept the size from before the compact (285K instead of a few dozen K) and priced the next message on it. Claude Code still reports the old size when the compact finishes, so the bar now estimates the new size: the summary plus what comes back with it, never more than before (#11).
+
+### Changed
+- Sizes the bar used to assume are now learned from your own chats, as the median of your last 20: what returns after a `/compact`, and for `/cmaxx-handoff` Haiku's input and output and the brief's size (the fresh chat's start was already learned). Defaults apply only until your first sample.
+
 ## [0.5.0] - 2026-11-19
 
 Thanks to @giulioc84 (#1–#7), @xyaso66-del (#9), @lysol321 (#10) and @jstockall (#8) for the careful reports and the fix.

@@ -6,7 +6,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Rec } from '../types'
 import { assembleBrief, briefPrompt, extractFacts, handoffPath, isValidBrief, parseSkill, savingsLine, seedLine, transcriptGuess } from './handoff'
 import type { Numbers } from './handoff'
-import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, fromSessionStart, haikuUsd, handoffSaving, newerVersion, priceOf, readSettings, sendWarning, setFreshStart, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, ttlFromUsage, validatePrices } from './logic'
+import { type Learned, PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, fromSessionStart, haikuUsd, handoffSaving, newerVersion, priceOf, readSettings, compactPrefix, sendWarning, setLearned, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, ttlFromUsage, validatePrices } from './logic'
 import type { Stats } from './logic'
 
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000 // saved chats older than this are pruned; an older chat refills on resume
@@ -19,7 +19,7 @@ const SEED_MS = 30_000 // a handoff line older than this is stale: a later /clea
 // An error for a reply: its message only, never a cut-off "Error: …" dump
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 200)
 const SAME_REPLY_MS = 10 * 60_000 // an estimate this close after an exact record describes the same reply
-const FRESH_SAMPLES = 20 // fresh chats' first cache writes kept for the handoff saving
+const SAMPLES = 20 // each learned size keeps your last 20 (logic.ts `setLearned`)
 
 // `shape` declines a record an older version stored in another form (no NaN:NaN).
 const last = atom({ plugin: 'cache-maxxing', key: 'last' } as const, null, { shape: 'rec-2' })
@@ -32,9 +32,18 @@ const hidden = atom({ plugin: 'cache-maxxing', key: 'hidden' } as const, false)
 let pendingSeed: { line: string; at: number } | undefined
 let transcriptPath: string | undefined
 let isNewChat = false // the next main reply is a fresh chat's first: its cache write is a fresh start's size
+let compactSummary: number | undefined // the last /compact's summary tokens (chars / 4), until the next main request measures what came back with it
 let savedFor: number | undefined // the expired cache a handoff saving was counted for: a second handoff of it saves nothing more
 
 // Clipboard first; if that fails too, a toast shows the line to copy by hand.
+// Adds one sample of a size learned from your own chats and puts the new median in use.
+async function learn($: EngineInterface, key: Learned, x: unknown) {
+  const had = await $.store.get(key).catch(() => undefined)
+  const xs = [...(Array.isArray(had) ? had : []), x].slice(-SAMPLES)
+  setLearned(key, xs)
+  await $.store.set(key, xs).catch(() => {})
+}
+
 async function copyOrSay($: EngineInterface, line: string) {
   const c = await $.ui.copy({ text: line }).catch(() => ({ isCopied: false }))
   $.ui.toast(c.isCopied ? `Handoff line copied. Paste it into a new chat: ${line}` : `Start a new chat and send: ${line}`)
@@ -193,7 +202,7 @@ export const register: Register = (on, options) => {
     })
     void prune($).catch(() => {}) // in the background: never holds up the first prompt
     await loadPrices($).catch(() => {})
-    setFreshStart(await $.store.get('fresh').catch(() => undefined))
+    for (const k of ['fresh', 'brief', 'haiku', 'compact'] as const) setLearned(k, await $.store.get(k).catch(() => undefined))
     await adopt($, null).catch(() => {}) // bring back this chat's saved record (app restart, reload)
     return next(e)
   })
@@ -252,12 +261,13 @@ export const register: Register = (on, options) => {
       })
       if (isNewChat) {
         isNewChat = false
-        if (isInteractive) {
-          const had = await $.store.get('fresh').catch(() => undefined)
-          const fresh = [...(Array.isArray(had) ? had : []), u.cache_creation_input_tokens].slice(-FRESH_SAMPLES)
-          setFreshStart(fresh)
-          await $.store.set('fresh', fresh).catch(() => {})
-        }
+        if (isInteractive) await learn($, 'fresh', u.cache_creation_input_tokens)
+      }
+      if (compactSummary !== undefined) {
+        // the first request after a /compact: what came back besides the summary (issue #11)
+        const add = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens - compactSummary
+        compactSummary = undefined
+        if (isInteractive) await learn($, 'compact', Math.max(0, add))
       }
       // a reply sent after this chat's cache expired or was reset paid for a rebuild: its cache write.
       // Reading under half the last prefix while warm: something reset it with no event (effort, tools, cleared images; issue #5)
@@ -295,11 +305,9 @@ export const register: Register = (on, options) => {
   on('classic.PostCompact', async ($, e, next) => {
     const prev = await read($, last)
     if (prev) {
-      const measured = (await $.session.usage()).context.tokens
-      // estimate when the engine has no figure yet: summary at ~4 chars/token plus the fixed system part
-      // `||`: a 0 from the engine would price the rebuild as free (issue #5)
-      const prefix = measured || Math.round(e.compact_summary.length / 4) + 20_000
-      await save($, { ...prev, prefix, out: 0, resetBy: 'compact', warned: false })
+      // estimated, never read from usage(): it still holds the size before the compact (issue #11)
+      compactSummary = Math.round(e.compact_summary.length / 4)
+      await save($, { ...prev, prefix: compactPrefix(e.compact_summary.length, prev.prefix), out: 0, resetBy: 'compact', warned: false })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // fail open: never get in Claude Code's way
@@ -430,7 +438,8 @@ export const register: Register = (on, options) => {
       const problem = usable ? undefined : !r.isAnswered ? `Haiku ${r.reason}` : `Haiku's reply had ${r.text.trim() ? 'none of the sections' : 'no text'}, in ${r.usage.input_tokens} / out ${r.usage.output_tokens} of 64000 tokens`
       const transcript = transcriptPath ?? transcriptGuess(await $.session.cwd(), sessionId, await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined))
       const path = handoffPath(now, sessionId)
-      await $.fs.write(path, assembleBrief({ sessionId, transcript, skill }, facts, nums, usable))
+      const brief = assembleBrief({ sessionId, transcript, skill }, facts, nums, usable)
+      await $.fs.write(path, brief)
       // briefs quote the chat: the folder ignores itself so `git add -A` never picks them up
       const ignore = '.claude/handoffs/.gitignore'
       if (!(await $.fs.stat(ignore).catch(() => undefined))) await $.fs.write(ignore, '*\n').catch(() => {})
@@ -443,6 +452,9 @@ export const register: Register = (on, options) => {
       // once per expired cache: running it again, or carrying on in the old chat, saves nothing more (issue #3)
       const saved = main?.isCold && rec!.at !== savedFor ? handoffSaving(main.tokens, main.cold, haiku) : null
       if (saved) savedFor = rec!.at
+      // the next 🔴 tip's estimate learns from this handoff (your call 2026-11-21: medians, per user)
+      if (haiku) await learn($, 'haiku', [haiku.in, haiku.out]).catch(() => {})
+      await learn($, 'brief', Math.round(brief.length / 4)).catch(() => {})
       await count($, { handoffs: 1, ...(saved ? { savedTokens: saved.tokens, savedUsd: saved.usd } : {}) }, sessionId).catch(() => {})
       await flush($).catch(() => {}) // the old chat is about to be cleared: keep its handoff now
       if ((await $.session.surfaces()).includes('desktop')) {

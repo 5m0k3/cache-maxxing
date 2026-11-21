@@ -777,6 +777,55 @@ test('compact: a 0 from the engine is not a free rebuild (issue #5)', async ($, 
   await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small chat, fine to keep going')
 })
 
+// Seen live 2.1.329 (issue #11): at PostCompact usage() still reports the size before the compact.
+test('compact: the size from before the compact is not used (issue #11)', async ($, on) => {
+  const w = engine(on, { contextTokens: 228_000 })
+  await start($)
+  await w.reply($, { read: 228_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never)
+  await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small chat, fine to keep going')
+})
+
+test('compact: what comes back besides the summary is learned from your own next request (issue #11)', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 228_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never) // 10K summary
+  await w.reply($, { read: 0, write: 70_000 }) // 60K came back with it
+  await w.reply($, { read: 228_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never)
+  expect((await bars($))[0]).toContain(' · 70K / 1M · ')
+})
+
+test('compact: the estimate never exceeds the size before the compact', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 25_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never) // 10K + 20K default > 25K
+  expect((await bars($))[0]).toContain(' · 25K / 1M · ')
+})
+
+test('handoff: its real Haiku use and brief size are kept for the next 🔴 tip', async ($, on) => {
+  const h = handoffEngine(on)
+  await start($, 'terminal')
+  await h.reply($, { read: 228_000, write: 0 })
+  await h.clock.advance(70 * MIN)
+  await handoff($)
+  // the chat's expired record is still shown: 228K - Haiku's 40K + 1.5K - (9K fresh default + this brief)
+  const brief = Math.round(h.calls.writes[0]!.text.length / 4)
+  expect((await bars($))[0]).toContain(`to save ${Math.round((228_000 - 41_500 - 9_000 - brief) / 1e3)}K tokens`)
+})
+
+test('handoff: Haiku failed → nothing learned about Haiku, the brief still counts', async ($, on) => {
+  const h = handoffEngine(on, { reply: null })
+  await start($, 'terminal')
+  await h.reply($, { read: 228_000, write: 0 })
+  await h.clock.advance(70 * MIN)
+  await handoff($)
+  const brief = Math.round(h.calls.writes[0]!.text.length / 4)
+  expect((await bars($))[0]).toContain(`to save ${Math.round((228_000 - 45_000 - 9_000 - brief) / 1e3)}K tokens`) // Haiku's default 40K + 5K
+})
+
 test('stats: a warm reply that read under half the chat paid for a rebuild with no event (issue #5)', async ($, on) => {
   const w = engine(on)
   await start($)

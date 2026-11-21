@@ -3,7 +3,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Rec } from '../types'
-import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, handoffSaving, haikuUsd, money, newerVersion, priceOf, sendWarning, setFreshStart, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, ttlFromUsage, validatePrices } from '../hooks/logic'
+import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, handoffSaving, haikuUsd, money, newerVersion, priceOf, compactPrefix, haikuEstimate, sendWarning, setLearned, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, ttlFromUsage, validatePrices } from '../hooks/logic'
 import { savingsLine } from '../hooks/handoff'
 
 const MIN = 60_000
@@ -277,11 +277,32 @@ test('transcript: a "<$0.01" saving keeps its tokens; the Haiku tier counts unca
 test('handoff saving: the fresh chat\'s size is learned from the user\'s own first replies (issue #3)', () => {
   // 228K expired on Opus 5.5, Haiku 45K: the default 13K start
   expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(170_000)
-  setFreshStart([42_000, 40_000, 44_000]) // median 42K + 4K brief read
+  setLearned('fresh', [42_000, 40_000, 44_000]) // median 42K + 4K brief read
   expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(137_000)
-  setFreshStart([90_000, 'x', -1]) // under 3 good samples: back to the default
+  setLearned('fresh', [90_000, 'x', -1]) // under 3 good samples: back to the default
   expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(170_000)
-  setFreshStart(undefined)
+  setLearned('fresh', undefined)
+})
+
+test('handoff estimate: Haiku in and out and the brief are medians of your own handoffs', () => {
+  expect(haikuEstimate()).toMatchObject(HAIKU_ESTIMATE) // none yet: the default
+  setLearned('haiku', [[20_000, 1_000], [30_000, 3_000], [10_000, 2_000], 'junk'])
+  expect(haikuEstimate()).toMatchObject({ in: 20_000, out: 2_000 })
+  setLearned('brief', [8_000]) // 4K more than the default brief: 4K less saved
+  expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0 }).tokens).toBe(166_000)
+  setLearned('haiku', undefined)
+  setLearned('brief', undefined)
+})
+
+test('compact estimate: summary plus your learned overhead, never above the size before (issue #11)', () => {
+  expect(compactPrefix(40_000, 228_000)).toBe(30_000) // 10K + 20K default
+  setLearned('fresh', [26_000, 26_000, 26_000])
+  expect(compactPrefix(40_000, 228_000)).toBe(36_000) // no compact seen yet: your fresh-chat start
+  setLearned('compact', [64_000])
+  expect(compactPrefix(40_000, 228_000)).toBe(74_000)
+  expect(compactPrefix(40_000, 56_000)).toBe(56_000) // a small chat barely shrinks
+  setLearned('compact', undefined)
+  setLearned('fresh', undefined)
 })
 
 test('a downloaded price table is refused unless it is sane and not older than the bundled one', () => {
